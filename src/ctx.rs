@@ -181,6 +181,7 @@
 //! ```
 
 use core::mem::{MaybeUninit, size_of};
+use core::ops::Range;
 use core::ptr::copy_nonoverlapping;
 use core::{result, str};
 #[cfg(feature = "std")]
@@ -380,6 +381,19 @@ pub trait TryIntoCtx<Ctx: Copy = (), This: ?Sized = [u8]>: Sized {
 /// 2. Allow a context based size, which is useful for 32/64 bit variants for various containers, etc.
 pub trait SizeWith<Ctx = ()> {
     fn size_with(ctx: &Ctx) -> usize;
+}
+
+pub trait ActualSizeWith<Ctx = ()> {
+    fn actual_size_with(&self, ctx: &Ctx) -> usize;
+}
+
+impl<T, Ctx> ActualSizeWith<Ctx> for T
+where
+    T: SizeWith<Ctx>,
+{
+    fn actual_size_with(&self, ctx: &Ctx) -> usize {
+        Self::size_with(ctx)
+    }
 }
 
 #[rustfmt::skip]

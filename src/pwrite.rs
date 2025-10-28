@@ -1,6 +1,6 @@
 use core::result;
 
-use crate::ctx::TryIntoCtx;
+use crate::ctx::{ActualSizeWith, TryIntoCtx};
 use crate::error;
 
 /// A very generic, contextual pwrite interface in Rust.
@@ -100,4 +100,14 @@ impl<Ctx: Copy, E: From<error::Error>> Pwrite<Ctx, E> for [u8] {
         let dst = &mut self[offset..];
         n.try_into_ctx(dst, ctx)
     }
+}
+
+pub fn pwrite_vec_with<Ctx: Copy, E>(
+    n: impl TryIntoCtx<Ctx, [u8], Error = E> + ActualSizeWith<Ctx>,
+    ctx: Ctx,
+) -> result::Result<Vec<u8>, E> {
+    let size = n.actual_size_with(&ctx);
+    let mut buf = vec![0u8; size];
+    n.try_into_ctx(&mut buf[..], ctx)?;
+    Ok(buf)
 }
