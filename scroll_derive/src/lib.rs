@@ -935,6 +935,13 @@ fn actual_size_with(
                 0 #(+ #items)*
             }
         }
+
+        impl #gl #gp #gg ::scroll::ctx::ActualSizeWith<::scroll::Endian> for &#name #gn #gw {
+            #[inline]
+            fn actual_size_with(&self, ctx: &::scroll::Endian) -> usize {
+                (*self).actual_size_with(ctx)
+            }
+        }
     }
 }
 
