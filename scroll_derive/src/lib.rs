@@ -771,11 +771,11 @@ fn actual_size_with(
                             let size = int.base10_parse::<usize>().unwrap();
                             if let Some(wrapper) = custom_with {
                                 quote! {
-                                    (#size * <#wrapper>::actual_size_with(&self.#ident, #ctx))
+                                    (#size * <#wrapper>::actual_size_with(&self.#ident.into(), #ctx))
                                 }
                             } else {
                                 quote! {
-                                    (#size * <#elem>::actual_size_with(&self.#ident, #ctx))
+                                    (#size * <#elem>::actual_size_with(&self.#ident.into(), #ctx))
                                 }
                             }
                         }
