@@ -1,5 +1,5 @@
 use scroll::{BE, Cread, Cwrite, IOread, IOwrite, LE, Pread, Pwrite};
-use scroll_derive::{IOread, IOwrite, Pread, Pwrite, SizeWith};
+use scroll_derive::{ActualSizeWith, IOread, IOwrite, Pread, Pwrite, SizeWith};
 
 use scroll::ctx::SizeWith;
 
@@ -52,7 +52,7 @@ fn test_array() {
     println!("data: {data:?}");
 }
 
-#[derive(Debug, PartialEq, Pread, Pwrite, SizeWith)]
+#[derive(Debug, PartialEq, Eq, Pread, Pwrite, SizeWith)]
 struct Data3 {
     name: u32,
 }
@@ -232,7 +232,7 @@ fn test_reference() {
     assert_eq!(bytes[..7], *b"\xff\x01\x00name");
 }
 
-#[derive(Debug, PartialEq, Pwrite, Pread, IOwrite, IOread, SizeWith)]
+#[derive(Debug, PartialEq, Eq, Pwrite, Pread, IOwrite, IOread, SizeWith)]
 struct Data11 {
     pub a: u16,
     #[scroll(ctx = LE)]
@@ -350,4 +350,41 @@ fn test_roundtrip_enum_u32() {
     assert_eq!(bytes.pwrite(foo_three, 0).unwrap(), 4);
     assert_eq!(bytes, [10, 0, 0, 0]);
     assert!(bytes.pwrite(Foo::Three, 1).is_err());
+}
+
+#[test]
+fn test_roundtrip_enum_unnamed() {
+    #[derive(Pread, Pwrite, Debug, PartialEq, Eq, ActualSizeWith)]
+    #[repr(u8)]
+    enum Foo {
+        One = 1,
+        Two = 2,
+        Three(Data3) = 10,
+    }
+
+    let mut bytes = [10, 0x44, 0x33, 0x22, 0x11];
+    let foo_three = bytes.pread::<Foo>(0).unwrap();
+    assert_eq!(Foo::Three(Data3 {
+        name: 0x11223344
+    }), foo_three);
+    bytes[0] = 1;
+    let foo_one = bytes.pread::<Foo>(0).unwrap();
+    assert_eq!(Foo::One, foo_one);
+    bytes[0] = 2;
+    let foo_two = bytes.pread::<Foo>(0).unwrap();
+    assert_eq!(Foo::Two, foo_two);
+    let error = bytes.pread::<Foo>(1);
+    assert!(error.is_err());
+    assert_eq!(bytes.pwrite(foo_two, 0).unwrap(), 1);
+    assert_eq!(bytes, [2, 0x44, 0x33, 0x22, 0x11]);
+    assert_eq!(bytes.pwrite(foo_one, 0).unwrap(), 1);
+    assert_eq!(bytes, [1, 0x44, 0x33, 0x22, 0x11]);
+    let foo_three = Foo::Three(Data3 {
+        name: 0xAABBCCDD
+    });
+    assert_eq!(bytes.pwrite(foo_three, 0).unwrap(), 5);
+    assert_eq!(bytes, [10, 0xDD, 0xCC, 0xBB, 0xAA]);
+    assert!(bytes.pwrite(Foo::Three(Data3 {
+        name: 0x11223344
+    }), 1).is_err());
 }

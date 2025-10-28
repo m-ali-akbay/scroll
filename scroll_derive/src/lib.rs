@@ -2,6 +2,8 @@
 
 extern crate proc_macro;
 
+use std::panic;
+
 use proc_macro2::Span;
 use quote::{ToTokens, format_ident, quote};
 use syn::Ident;
@@ -301,11 +303,25 @@ fn impl_struct(
     }
 }
 
-fn ensure_fieldless(variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>) {
-    for variant in variants {
-        if !variant.fields.is_empty() {
-            panic!("Deriving enums in scroll must be primitive, fieldless enums");
+fn ensure_simple_variant(variant: &syn::Variant) {
+    match variant.fields {
+        syn::Fields::Unit => {}
+        syn::Fields::Unnamed(ref fields) => {
+            if fields.unnamed.len() != 1 {
+                panic!("cannot be derived for enums with fields other than a single unnamed field");
+            }
         }
+        syn::Fields::Named(ref fields) => {
+            if !fields.named.is_empty() {
+                panic!("cannot be derived for enums with named fields");
+            }
+        }
+    }
+}
+
+fn ensure_simple_variants(variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>) {
+    for variant in variants {
+        ensure_simple_variant(variant);
     }
 }
 
@@ -342,15 +358,27 @@ fn impl_try_from_ctx_enum(
     let variant_consts = variants.iter().map(|variant| {
         let ident = &variant.ident;
         let const_name = format_ident!("_{}", ident.to_string().to_uppercase());
+        let discriminant = match &variant.discriminant {
+            Some((_, discriminant)) => quote! { #discriminant },
+            None => quote! { #name::#ident },
+        };
         quote! {
-            const #const_name: #repr_type = #name::#ident as #repr_type;
+            const #const_name: #repr_type = #discriminant as #repr_type;
         }
     });
     let variant_cases = variants.iter().map(|variant| {
         let ident = &variant.ident;
         let const_name = format_ident!("_{}", ident.to_string().to_uppercase());
-        quote! {
-            #const_name => #name::#ident,
+        match &variant.fields {
+            syn::Fields::Unit => quote! {
+                #const_name => #name::#ident,
+            },
+            syn::Fields::Unnamed(_) => quote! {
+                #const_name => {
+                    #name::#ident(src.gread_with(offset, ctx)?)
+                },
+            },
+            _ => unreachable!("validated earlier"),
         }
     });
     let static_msg = format!(
@@ -377,7 +405,7 @@ fn impl_try_from_ctx_enum(
 
 fn validate_enum(ast: &syn::DeriveInput, data: &syn::DataEnum) -> Ident {
     let repr_type = extract_repr_type(ast);
-    ensure_fieldless(&data.variants);
+    ensure_simple_variants(&data.variants);
     repr_type
 }
 
@@ -570,22 +598,61 @@ fn impl_try_into_ctx(
     }
 }
 
-fn impl_try_into_ctx_primitive_enum(
+fn impl_try_into_ctx_enum(
     name: &Ident,
     repr_type: Ident,
-    _variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+    variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
 ) -> proc_macro2::TokenStream {
+    let variant_consts = variants.iter().map(|variant| {
+        let ident = &variant.ident;
+        let const_name = format_ident!("_{}", ident.to_string().to_uppercase());
+        let discriminant = match &variant.discriminant {
+            Some((_, discriminant)) => quote! { #discriminant },
+            None => quote! { #name::#ident },
+        };
+        quote! {
+            const #const_name: #repr_type = #discriminant as #repr_type;
+        }
+    });
+    let variant_repr_cases = variants.iter().map(|variant| {
+        let ident = &variant.ident;
+        let const_name = format_ident!("_{}", ident.to_string().to_uppercase());
+        match &variant.fields {
+            syn::Fields::Unit => quote! { #name::#ident => #const_name },
+            syn::Fields::Unnamed(_) => quote! { #name::#ident(_) => #const_name },
+            _ => unreachable!("validated earlier"),
+        }
+    });
+    let variant_into_cases = variants.iter().map(|variant| {
+        let ident = &variant.ident;
+        match &variant.fields {
+            syn::Fields::Unit => quote! { #name::#ident => () },
+            syn::Fields::Unnamed(_) => {
+                quote! { #name::#ident(v) => { dst.gwrite_with(v, &mut offset, ctx)?; } }
+            }
+            _ => unreachable!("validated earlier"),
+        }
+    });
+
     quote! {
         impl ::scroll::ctx::TryIntoCtx<::scroll::Endian> for &'_ #name {
             type Error = ::scroll::Error;
             #[inline]
             fn try_into_ctx(self, dst: &mut [u8], ctx: ::scroll::Endian) -> ::scroll::export::result::Result<usize, Self::Error> {
                 use ::scroll::Pwrite;
-                // SAFETY: https://doc.rust-lang.org/std/mem/fn.discriminant.html#accessing-the-numeric-value-of-the-discriminant
-                // > If an enum has opted-in to having a primitive representation for its discriminant,
-                // > then it’s possible to use pointers to read the memory location storing the discriminant.
-                // NB: the derive macro ensures that we are a primitive (and also fieldless) enum
-                dst.pwrite_with(unsafe { *<*const _>::from(self).cast::<#repr_type>() }, 0, ctx)
+                #(#variant_consts)*
+
+                let mut offset = 0;
+
+                dst.gwrite_with(match self {
+                    #(#variant_repr_cases,)*
+                }, &mut offset, ctx)?;
+
+                match self {
+                    #(#variant_into_cases,)*
+                };
+
+                Ok(offset)
             }
         }
 
@@ -612,7 +679,7 @@ fn impl_pwrite(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
         },
         syn::Data::Enum(data) => {
             let repr_type = validate_enum(ast, data);
-            impl_try_into_ctx_primitive_enum(&ast.ident, repr_type, &data.variants)
+            impl_try_into_ctx_enum(&ast.ident, repr_type, &data.variants)
         }
         _ => panic!("Pwrite can only be derived for structs and primitive enums"),
     }
@@ -730,6 +797,9 @@ fn impl_size_with(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
                 panic!("SizeWith can not be derived for unit structs")
             }
         },
+        syn::Data::Enum(_) => {
+            panic!("SizeWith can not be derived for enums (TODO)")
+        },
         _ => panic!("SizeWith can only be derived for structs"),
     }
 }
@@ -739,6 +809,40 @@ pub fn derive_sizewith(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
     let ast: syn::DeriveInput = syn::parse(input).unwrap();
     let generated = impl_size_with(&ast);
     generated.into()
+}
+
+
+fn impl_actual_size_with_enum(
+    name: &syn::Ident,
+    repr_type: syn::Ident,
+    variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+) -> proc_macro2::TokenStream {
+    let variant_cases = variants.iter().map(|variant| {
+        let ident = &variant.ident;
+        match &variant.fields {
+            syn::Fields::Unit => quote! {
+                #name::#ident => 0,
+            },
+            syn::Fields::Unnamed(_) => quote! {
+                #name::#ident(v) => {
+                    v.actual_size_with(ctx)
+                },
+            },
+            _ => unreachable!("validated earlier"),
+        }
+    });
+    quote! {
+        impl ::scroll::ctx::ActualSizeWith<::scroll::Endian> for #name {
+            #[inline]
+            fn actual_size_with(&self, ctx: &::scroll::Endian) -> usize {
+              use ::scroll::ctx::SizeWith;
+              use ::scroll::ctx::ActualSizeWith;
+              #repr_type::size_with(ctx) + match self {
+                #(#variant_cases)*
+              }
+            }
+        }
+    }
 }
 
 fn actual_size_with(
@@ -761,26 +865,8 @@ fn actual_size_with(
                 syn::Type::Reference(_) => {
                     panic!("ActualSizeWith cannot be derived for references")
                 }
-                syn::Type::Array(array) => {
-                    let elem = &array.elem;
-                    match &array.len {
-                        syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Int(int),
-                            ..
-                        }) => {
-                            let size = int.base10_parse::<usize>().unwrap();
-                            if let Some(wrapper) = custom_with {
-                                quote! {
-                                    (#size * <#wrapper>::actual_size_with(&self.#ident.into(), #ctx))
-                                }
-                            } else {
-                                quote! {
-                                    (#size * <#elem>::actual_size_with(&self.#ident.into(), #ctx))
-                                }
-                            }
-                        }
-                        _ => panic!("ActualSizeWith derive has bad array constexpr"),
-                    }
+                syn::Type::Array(_) => {
+                    panic!("ActualSizeWith cannot be derived for arrays (TODO)")
                 }
                 _ => {
                     if let Some(wrapper) = custom_with {
@@ -847,7 +933,11 @@ fn impl_actual_size_with(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
                 panic!("ActualSizeWith can not be derived for unit structs")
             }
         },
-        _ => panic!("ActualSizeWith can only be derived for structs"),
+        syn::Data::Enum(data) => {
+            let repr_type = validate_enum(ast, data);
+            impl_actual_size_with_enum(&ast.ident, repr_type, &data.variants)
+        }
+        _ => panic!("ActualSizeWith can only be derived for structs and enums"),
     }
 }
 
