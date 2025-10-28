@@ -79,6 +79,7 @@ fn impl_field(
     src: &proc_macro2::Ident,
     default_ctx: &proc_macro2::TokenStream,
     custom_ctx: Option<&proc_macro2::TokenStream>,
+    custom_with: Option<&proc_macro2::TokenStream>,
     offset: &Ident,
     noctx: bool,
 ) -> proc_macro2::TokenStream {
@@ -90,17 +91,33 @@ fn impl_field(
             src,
             default_ctx,
             custom_ctx,
+            custom_with,
             offset,
             noctx,
         ),
         _ => {
-            if noctx {
-                quote! {
-                    let #ident = #src.gread::<#ty>(#offset)?;
+            if let Some(wrapper) = custom_with {
+                // Use wrapper type for reading, then convert into the field type via Into
+                if noctx {
+                    quote! {
+                        let __wrap = #src.gread::<#wrapper>(#offset)?;
+                        let #ident: #ty = (&__wrap).into();
+                    }
+                } else {
+                    quote! {
+                        let __wrap = #src.gread_with::<#wrapper>(#offset, #ctx)?;
+                        let #ident: #ty = (&__wrap).into();
+                    }
                 }
             } else {
-                quote! {
-                    let #ident = #src.gread_with::<#ty>(#offset, #ctx)?;
+                if noctx {
+                    quote! {
+                        let #ident = #src.gread::<#ty>(#offset)?;
+                    }
+                } else {
+                    quote! {
+                        let #ident = #src.gread_with::<#ty>(#offset, #ctx)?;
+                    }
                 }
             }
         }
@@ -124,7 +141,7 @@ fn get_attr<'a>(attr_ident: &str, field: &'a syn::Field) -> Option<&'a syn::Attr
 /// #[scroll(ctx = expr)]
 /// field: T,
 /// ```
-fn custom_ctx(field: &syn::Field, noctx: &mut bool) -> Option<proc_macro2::TokenStream> {
+fn custom(field: &syn::Field, noctx: &mut bool, with: &mut Option<proc_macro2::TokenStream>) -> Option<proc_macro2::TokenStream> {
     get_attr("scroll", field).and_then(|x| {
         // parsed #[scroll..]
         // `expr` is `None` if the `ctx` key is not used.
@@ -140,6 +157,12 @@ fn custom_ctx(field: &syn::Field, noctx: &mut bool) -> Option<proc_macro2::Token
             if meta.path.is_ident("noctx") {
                 // parsed #[scroll(noctx)]
                 *noctx = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("with") {
+                let value = meta.value()?;
+                // allow a type or path expression; parsing as Type is flexible enough for our use
+                *with = Some(value.parse::<syn::Type>()?.into_token_stream());
                 return Ok(());
             }
             Err(meta.error(match meta.path.get_ident() {
@@ -192,9 +215,10 @@ fn impl_struct(
                     (quote! {#t}, suf)
                 });
             let ty = &f.ty;
-            // parse the `expr` out of #[scroll(ctx = expr)]
+            // parse the `expr` out of #[scroll(ctx = expr)] and optional wrapper with = ...
             let mut noctx = false;
-            let custom_ctx = custom_ctx(f, &mut noctx);
+            let mut custom_with = None;
+            let custom_ctx = custom(f, &mut noctx, &mut custom_with);
             (
                 impl_field(
                     &prefixed_ident,
@@ -202,6 +226,7 @@ fn impl_struct(
                     &src,
                     &ctx,
                     custom_ctx.as_ref(),
+                    custom_with.as_ref(),
                     &offset,
                     noctx,
                 ),
@@ -387,6 +412,7 @@ fn impl_pwrite_field(
     ty: &syn::Type,
     default_ctx: &proc_macro2::TokenStream,
     custom_ctx: Option<&proc_macro2::TokenStream>,
+    custom_with: Option<&proc_macro2::TokenStream>,
     offset: &proc_macro2::Ident,
     noctx: bool,
 ) -> proc_macro2::TokenStream {
@@ -407,7 +433,7 @@ fn impl_pwrite_field(
             _ => panic!("Pwrite derive with bad array constexpr"),
         },
         syn::Type::Group(group) => {
-            impl_pwrite_field(ident, &group.elem, default_ctx, custom_ctx, offset, noctx)
+            impl_pwrite_field(ident, &group.elem, default_ctx, custom_ctx, custom_with, offset, noctx)
         }
         syn::Type::Reference(reference) => match *reference.elem {
             syn::Type::Slice(_) => {
@@ -433,8 +459,16 @@ fn impl_pwrite_field(
             }
         },
         _ => {
-            quote! {
-                dst.gwrite_with(&self.#ident, #offset, #ctx)?
+            if let Some(wrapper) = custom_with {
+                // convert the field into the wrapper and write the wrapper
+                quote! {
+                    let __wrap: #wrapper = ::std::convert::From::from(&self.#ident);
+                    dst.gwrite_with(&__wrap, #offset, #ctx)?
+                }
+            } else {
+                quote! {
+                    dst.gwrite_with(&self.#ident, #offset, #ctx)?
+                }
             }
         }
     }
@@ -456,8 +490,9 @@ fn impl_try_into_ctx(
         .map(|(ident, f)| {
             let ty = &f.ty;
             let mut noctx = false;
-            let custom_ctx = custom_ctx(f, &mut noctx);
-            impl_pwrite_field(ident, ty, &ctx, custom_ctx.as_ref(), &offset, noctx)
+            let mut custom_with = None;
+            let custom_ctx = custom(f, &mut noctx, &mut custom_with);
+            impl_pwrite_field(ident, ty, &ctx, custom_ctx.as_ref(), custom_with.as_ref(), &offset, noctx)
         })
         .collect();
 
@@ -600,7 +635,8 @@ fn size_with(
         .map(|f| {
             let ty = &f.ty;
             let mut noctx = false;
-            let custom_ctx = custom_ctx(f, &mut noctx).map(|x| quote! {&#x});
+            let mut custom_with = None;
+            let custom_ctx = custom(f, &mut noctx, &mut custom_with).map(|x| quote! {&#x});
             let default_ctx =
                 syn::Ident::new("ctx", proc_macro2::Span::call_site()).into_token_stream();
             let ctx = custom_ctx.unwrap_or(default_ctx);
@@ -616,16 +652,28 @@ fn size_with(
                             ..
                         }) => {
                             let size = int.base10_parse::<usize>().unwrap();
-                            quote! {
-                                (#size * <#elem>::size_with(#ctx))
+                            if let Some(wrapper) = custom_with {
+                                quote! {
+                                    (#size * <#wrapper>::size_with(#ctx))
+                                }
+                            } else {
+                                quote! {
+                                    (#size * <#elem>::size_with(#ctx))
+                                }
                             }
                         }
                         _ => panic!("SizeWith derive has bad array constexpr"),
                     }
                 }
                 _ => {
-                    quote! {
-                        <#ty>::size_with(#ctx)
+                    if let Some(wrapper) = custom_with {
+                        quote! {
+                            <#wrapper>::size_with(#ctx)
+                        }
+                    } else {
+                        quote! {
+                            <#ty>::size_with(#ctx)
+                        }
                     }
                 }
             }
@@ -702,7 +750,8 @@ fn impl_cread_struct(
         let ident = &f.ident.as_ref().map(|i|quote!{#i}).unwrap_or({let t = proc_macro2::Literal::usize_unsuffixed(i); quote!{#t}});
         let ty = &f.ty;
         let mut noctx = false;
-        let custom_ctx = custom_ctx(f, &mut noctx);
+        let mut custom_with = None;
+        let custom_ctx = custom(f, &mut noctx, &mut custom_with);
         let default_ctx =
             syn::Ident::new("ctx", proc_macro2::Span::call_site()).into_token_stream();
         let ctx = custom_ctx.unwrap_or(default_ctx);
@@ -815,8 +864,9 @@ fn impl_into_ctx(
             });
             let ty = &f.ty;
             let mut noctx = false;
+            let mut with = None;
             let size = quote! { ::scroll::export::mem::size_of::<#ty>() };
-            let custom_ctx = custom_ctx(f, &mut noctx);
+            let custom_ctx = custom(f, &mut noctx, &mut with);
             let default_ctx =
                 syn::Ident::new("ctx", proc_macro2::Span::call_site()).into_token_stream();
             let ctx = custom_ctx.unwrap_or(default_ctx);
