@@ -823,10 +823,26 @@ fn impl_actual_size_with_enum(
             syn::Fields::Unit => quote! {
                 #name::#ident => 0,
             },
-            syn::Fields::Unnamed(_) => quote! {
-                #name::#ident(v) => {
-                    v.actual_size_with(ctx)
-                },
+            syn::Fields::Unnamed(fields) => {
+                let field = fields.unnamed.first().unwrap();
+                let mut noctx = false;
+                let mut custom_with = None;
+                let custom_ctx = custom(field, &mut noctx, &mut custom_with).map(|x| quote! {&#x});
+                let default_ctx =
+                    syn::Ident::new("ctx", proc_macro2::Span::call_site()).into_token_stream();
+                let _ctx = custom_ctx.unwrap_or(default_ctx); // TODO
+
+                match custom_with {
+                    Some(wrapper) => quote! {
+                        #name::#ident(v) => <#wrapper>::actual_size_with(&v.into(), ctx),
+                    },
+                    None => quote! {
+                        #name::#ident(v) => {
+                            v.actual_size_with(ctx)
+                        },
+                    }
+                }
+
             },
             _ => unreachable!("validated earlier"),
         }
