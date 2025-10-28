@@ -741,6 +741,123 @@ pub fn derive_sizewith(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
     generated.into()
 }
 
+fn actual_size_with(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    generics: &syn::Generics,
+) -> proc_macro2::TokenStream {
+    let fields = extract_idents_and_offset(fields).0;
+    let items: Vec<_> = fields
+        .iter()
+        .map(|(ident, f)| {
+            let ty = &f.ty;
+            let mut noctx = false;
+            let mut custom_with = None;
+            let custom_ctx = custom(f, &mut noctx, &mut custom_with).map(|x| quote! {&#x});
+            let default_ctx =
+                syn::Ident::new("ctx", proc_macro2::Span::call_site()).into_token_stream();
+            let ctx = custom_ctx.unwrap_or(default_ctx);
+            match ty {
+                syn::Type::Reference(_) => {
+                    panic!("ActualSizeWith cannot be derived for references")
+                }
+                syn::Type::Array(array) => {
+                    let elem = &array.elem;
+                    match &array.len {
+                        syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Int(int),
+                            ..
+                        }) => {
+                            let size = int.base10_parse::<usize>().unwrap();
+                            if let Some(wrapper) = custom_with {
+                                quote! {
+                                    (#size * <#wrapper>::actual_size_with(&self.#ident, #ctx))
+                                }
+                            } else {
+                                quote! {
+                                    (#size * <#elem>::actual_size_with(&self.#ident, #ctx))
+                                }
+                            }
+                        }
+                        _ => panic!("ActualSizeWith derive has bad array constexpr"),
+                    }
+                }
+                _ => {
+                    if let Some(wrapper) = custom_with {
+                        quote! {
+                            <#wrapper>::actual_size_with(&self.#ident, #ctx)
+                        }
+                    } else {
+                        quote! {
+                            <#ty>::actual_size_with(&self.#ident, #ctx)
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let gl = &generics.lt_token;
+    let gp = &generics.params;
+    let gg = &generics.gt_token;
+    let gn = gp.iter().map(|param: &syn::GenericParam| match param {
+        syn::GenericParam::Type(t) => {
+            let ident = &t.ident;
+            quote! { #ident }
+        }
+        p => quote! { #p },
+    });
+    let gn = quote! { #gl #( #gn ),* #gg };
+    let gw = if !gp.is_empty() {
+        let gi = gp
+            .iter()
+            .filter_map(|param: &syn::GenericParam| match param {
+                syn::GenericParam::Type(t) => {
+                    let ident = &t.ident;
+                    Some(quote! {
+                        #ident : ::scroll::ctx::ActualSizeWith<::scroll::Endian>
+                    })
+                }
+                syn::GenericParam::Lifetime(_) => None,
+                p => Some(quote! { #p }),
+            });
+        quote! { where #( #gi ),* }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        impl #gl #gp #gg ::scroll::ctx::ActualSizeWith<::scroll::Endian> for #name #gn #gw {
+            #[inline]
+            fn actual_size_with(&self, ctx: &::scroll::Endian) -> usize {
+                0 #(+ #items)*
+            }
+        }
+    }
+}
+
+fn impl_actual_size_with(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
+    let name = &ast.ident;
+    let generics = &ast.generics;
+    match &ast.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(fields) => actual_size_with(name, &fields.named, generics),
+            syn::Fields::Unnamed(fields) => actual_size_with(name, &fields.unnamed, generics),
+            _ => {
+                panic!("ActualSizeWith can not be derived for unit structs")
+            }
+        },
+        _ => panic!("ActualSizeWith can only be derived for structs"),
+    }
+}
+
+#[proc_macro_derive(ActualSizeWith, attributes(scroll))]
+pub fn derive_actualsizewith(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let ast: syn::DeriveInput = syn::parse(input).unwrap();
+    let generated = impl_actual_size_with(&ast);
+    generated.into()
+}
+
 fn impl_cread_struct(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
