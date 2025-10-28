@@ -887,7 +887,7 @@ fn actual_size_with(
                 _ => {
                     if let Some(wrapper) = custom_with {
                         quote! {
-                            <#wrapper>::actual_size_with(&self.#ident, #ctx)
+                            <#wrapper>::actual_size_with(&(&self.#ident).into(), #ctx)
                         }
                     } else {
                         quote! {
