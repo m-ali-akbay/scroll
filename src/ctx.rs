@@ -181,7 +181,6 @@
 //! ```
 
 use core::mem::{MaybeUninit, size_of};
-use core::ops::Range;
 use core::ptr::copy_nonoverlapping;
 use core::{result, str};
 #[cfg(feature = "std")]

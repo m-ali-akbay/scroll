@@ -85,6 +85,15 @@ pub trait Pwrite<Ctx: Copy, E> {
             size
         })
     }
+
+    #[inline]
+    fn pwrite_vec_with<N: TryIntoCtx<Ctx, [u8], Error = E> + ActualSizeWith<Ctx>>(
+        &mut self,
+        n: N,
+        ctx: Ctx,
+    ) -> result::Result<Vec<u8>, E> {
+        pwrite_vec_with(n, ctx)
+    }
 }
 
 impl<Ctx: Copy, E: From<error::Error>> Pwrite<Ctx, E> for [u8] {
